@@ -1,296 +1,138 @@
-from flask import Flask, request, render_template_string, redirect, session, url_for
-import os, hashlib, subprocess, json, re
+import telebot
 import requests
+import os
+import threading
+from flask import Flask
 
+BOT_TOKEN = "8400775347:AAHruoy1eurSYRM7WvUhqPQ7q32xWlT268c"
+API_KEY = "apikeysumi"
+API_URL = "https://adidaphat.site/facebook/getinfo"
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
+
+# Flask app cực đơn giản
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'
 
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-USER_DIR = os.path.join(ROOT_DIR, 'users')
-os.makedirs(USER_DIR, exist_ok=True)
-
-# ----------------- Helpers -----------------
-def hash_pass(p):
-    return hashlib.sha256(p.encode()).hexdigest()
-
-def get_user_file(username):
-    return os.path.join(USER_DIR, f"{username}.json")
-
-def user_folder(username):
-    folder = os.path.join(USER_DIR, username)
-    os.makedirs(folder, exist_ok=True)
-    return folder
-
-def extract_token(file_path):
+def get_info(uid):
     try:
-        with open(file_path, 'r') as f:
-            content = f.read()
-        m = re.search(r'BOT_TOKEN\s*=\s*[\'"](.+?)[\'"]', content)
-        return m.group(1) if m else None
+        res = requests.get(f"{API_URL}?uid={uid}&apikey={API_KEY}", timeout=10)
+        return res.json() if res.status_code == 200 else None
     except:
         return None
 
-def get_bot_name(token):
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=5)
-        if r.status_code==200:
-            data = r.json()
-            return data['result']['first_name']
-    except:
-        pass
-    return "UnknownBot"
+@bot.message_handler(commands=['idfb'])
+def cmd_idfb(message):
+    parts = message.text.split()
+    uid = parts[1] if len(parts) > 1 else None
+    
+    if uid:
+        process_uid(message, uid)
+    else:
+        bot.reply_to(message, "📝 Nhập UID:")
+        bot.register_next_step_handler(message, lambda m: process_uid(m, m.text))
 
-def get_bots(username):
-    folder = user_folder(username)
-    bots = []
-    for f in os.listdir(folder):
-        if f.endswith('_codefile.py'):
-            bot_name = f.replace('_codefile.py','')
-            pid_file = os.path.join(folder, bot_name+'_pid.txt')
-            status = 'Running' if os.path.exists(pid_file) else 'Stopped'
-            token = extract_token(os.path.join(folder, f))
-            display = get_bot_name(token) if token else "UnknownBot"
-            bots.append({'name':bot_name,'display':display,'status':status})
-    return bots
+def process_uid(message, uid):
+    uid = uid.strip()
+    if not uid or uid.startswith('/'): return
+    
+    data = get_info(uid)
+    if not data or "name" not in data:
+        bot.send_message(message.chat.id, f"❌ Không tìm thấy UID: `{uid}`")
+        return
+    
+    # Xử lý created_time
+    created_time = data.get('created_time', 'N/A')
+    if isinstance(created_time, str):
+        created_time = created_time.replace('||', ' | ')
+    
+    # Xử lý love
+    love_info = "Không có"
+    love_data = data.get('love')
+    if isinstance(love_data, dict):
+        love_name = love_data.get('name', '')
+        if love_name:
+            love_info = love_name
+    
+    result = (
+        f"📘 THÔNG TIN FACEBOOK\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Tên: {data.get('name', 'N/A')}\n"
+        f"🔗 Profile: {data.get('link_profile', 'N/A')}\n"
+        f"🆔 UID: {data.get('uid', uid)}\n"
+        f"📛 Username: @{data.get('username', 'Không có')}\n"
+        f"📅 Tạo tài khoản: {created_time}\n"
+        f"🎂 Sinh nhật: {data.get('birthday', 'N/A')}\n"
+        f"⚤ Giới tính: {data.get('gender', 'N/A')}\n"
+        f"💞 Mối quan hệ: {data.get('relationship_status', 'Không có dữ liệu!')}\n"
+        f"❤️ Người yêu: {love_info}\n"
+        f"📊 Người theo dõi: {data.get('follower', 'Không công khai')}\n"
+        f"✅ Tích xanh: {'✅ Có' if data.get('tichxanh') else '❌ Không'}\n"
+        f"📍 Địa điểm: {data.get('location', 'Không có')}\n"
+        f"🏠 Quê quán: {data.get('hometown', 'Không có')}\n"
+        f"💼 Công việc:\n{get_work_info(data)}\n"
+        f"📝 Giới thiệu:\n{data.get('about', 'Không có dữ liệu!')}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ Bot by FBCheck"
+    )
+    
+    bot.send_message(message.chat.id, result, disable_web_page_preview=True)
+    
+    if data.get('avatar'):
+        bot.send_photo(message.chat.id, data['avatar'], caption=f"🖼️ {data['name']}")
 
-def start_bot(username, bot_name):
-    folder = user_folder(username)
-    bot_file = os.path.join(folder, bot_name+'_codefile.py')
-    pid_file = os.path.join(folder, bot_name+'_pid.txt')
-    log_file = os.path.join(folder, bot_name+'_log.txt')
-    if os.path.exists(bot_file):
-        cmd = f"cd {folder} && nohup python3 {bot_name+'_codefile.py'} > {bot_name+'_log.txt'} 2>&1 & echo $!"
-        pid = subprocess.getoutput(cmd)
-        with open(pid_file,'w') as f:
-            f.write(pid)
+def get_work_info(data):
+    if not data.get('work'):
+        return "Không có thông tin"
+    jobs = []
+    for job in data['work'][:2]:
+        if isinstance(job, dict):
+            emp = job.get('employer', {})
+            if isinstance(emp, dict):
+                emp = emp.get('name', '')
+            else:
+                emp = ''
+            
+            pos = job.get('position', {})
+            if isinstance(pos, dict):
+                pos = pos.get('name', '')
+            else:
+                pos = ''
+                
+            if emp or pos:
+                jobs.append(f"{pos} tại {emp}" if pos and emp else emp or pos)
+    return "\n".join(jobs) if jobs else "Không có thông tin"
 
-def stop_bot(username, bot_name):
-    folder = user_folder(username)
-    pid_file = os.path.join(folder, bot_name+'_pid.txt')
-    if os.path.exists(pid_file):
-        with open(pid_file,'r') as f:
-            pid = f.read().strip()
-        try:
-            subprocess.run(['kill', pid])
-        except:
-            pass
-        os.remove(pid_file)
+@bot.message_handler(commands=['start', 'help'])
+def cmd_help(message):
+    bot.send_message(message.chat.id, 
+        "🤖 *FB Check Bot*\n\n"
+        "`/idfb [UID]` - Check TT FB\n"
+        "Ví dụ: `/idfb 1`")
 
-# ----------------- Routes -----------------
-@app.route('/', methods=['GET','POST'])
-def index():
-    if 'user' not in session:
-        return redirect(url_for('login'))
-    username = session['user']
-    success = None
+@bot.message_handler(func=lambda m: m.text and m.text.strip().isdigit())
+def handle_direct_uid(message):
+    process_uid(message, message.text.strip())
 
-    if request.method=='POST' and 'upload' in request.form:
-        f = request.files.get('codefile')
-        pf = request.files.get('filephu')
-        folder = user_folder(username)
-        if f:
-            f.save(os.path.join(folder, username+'_codefile.py'))
-        if pf:
-            pf.save(os.path.join(folder, pf.filename))
-        success = "Upload thành công"
+# Route đơn giản chỉ để Render biết app đang chạy
+@app.route('/')
+def home():
+    return "🤖 FB Check Bot đang chạy... (Bot Telegram)"
 
-    bots = get_bots(username)
-    return render_template_string('''
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tele Bot Manager</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>
-body {background: linear-gradient(135deg, #667eea, #764ba2); min-height:100vh;}
-.status-running {color: green; font-weight: bold;}
-.status-stopped {color: red; font-weight: bold;}
-.card {border-radius:15px; margin-top:20px;}
-.table-responsive {overflow-x:auto;}
-.btn {border-radius:50px;}
-</style>
-</head>
-<body>
-<div class="container">
-    <nav class="navbar navbar-dark bg-primary rounded mt-3">
-        <div class="container-fluid d-flex justify-content-between">
-            <span class="navbar-brand mb-0 h1">Tele Bot Manager</span>
-            <div>
-                <span class="text-white me-3">{{username}}</span>
-                <a class="btn btn-outline-light btn-sm" href="{{url_for('logout')}}">Đăng xuất</a>
-            </div>
-        </div>
-    </nav>
+@app.route('/health')
+def health_check():
+    return 'OK'
 
-    <div class="card">
-        <div class="card-header bg-success text-white">Upload Bot Telegram</div>
-        <div class="card-body">
-            <form method="post" enctype="multipart/form-data">
-                <div class="mb-2">
-                    <input type="file" name="codefile" class="form-control" required>
-                </div>
-                <div class="mb-2">
-                    <input type="file" name="filephu" class="form-control">
-                </div>
-                <button type="submit" name="upload" class="btn btn-primary w-100">Upload</button>
-            </form>
-            {% if success %}<div class="alert alert-success mt-2">{{success}}</div>{% endif %}
-        </div>
-    </div>
+# Chạy bot trong thread riêng
+def run_bot():
+    print("🤖 Bot đang chạy...")
+    bot.infinity_polling()
 
-    <div class="card">
-        <div class="card-header bg-info text-white">Danh sách Bot</div>
-        <div class="card-body table-responsive">
-            <table class="table table-hover table-bordered">
-                <thead class="table-light">
-                    <tr>
-                        <th>Bot Name</th>
-                        <th>Tên Bot Telegram</th>
-                        <th>Status</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                {% for bot in bots %}
-                    <tr>
-                        <td>{{bot.name}}</td>
-                        <td>{{bot.display}}</td>
-                        <td class="{{ 'status-running' if bot.status=='Running' else 'status-stopped' }}">{{bot.status}}</td>
-                        <td>
-                            {% if bot.status=='Running' %}
-                            <a href="{{url_for('bot_action', bot_name=bot.name, action='stop')}}" class="btn btn-sm btn-danger w-100">Stop</a>
-                            {% else %}
-                            <a href="{{url_for('bot_action', bot_name=bot.name, action='start')}}" class="btn btn-sm btn-success w-100">Start</a>
-                            {% endif %}
-                        </td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
-</body>
-</html>
-''', username=username, bots=bots, success=success)
-
-@app.route('/bot/<bot_name>/<action>')
-def bot_action(bot_name, action):
-    if 'user' not in session:
-        return redirect(url_for('login'))
-    username = session['user']
-    if action=='start':
-        start_bot(username, bot_name)
-    elif action=='stop':
-        stop_bot(username, bot_name)
-    return redirect(url_for('index'))
-
-@app.route('/login', methods=['GET','POST'])
-def login():
-    error_msg = None
-    if request.method=='POST':
-        username = request.form['username']
-        password = request.form['password']
-        user_file = get_user_file(username)
-        if os.path.exists(user_file):
-            data = json.load(open(user_file))
-            if hash_pass(password)==data['pass']:
-                session['user']=username
-                return redirect(url_for('index'))
-        error_msg = "Đăng nhập thất bại"
-
-    return render_template_string('''
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Đăng Nhập</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>
-body {background: linear-gradient(135deg, #667eea, #764ba2); min-height:100vh; display:flex; justify-content:center; align-items:center;}
-.card {border-radius:15px; padding:20px; width:100%; max-width:400px; box-shadow:0 8px 20px rgba(0,0,0,0.3);}
-.btn {border-radius:50px;}
-</style>
-</head>
-<body>
-<div class="card text-center">
-    <h2 class="mb-3 text-white">Đăng Nhập</h2>
-    {% if error_msg %}
-        <div class="alert alert-danger">{{error_msg}}</div>
-    {% endif %}
-    <form method="post">
-        <div class="mb-3 text-start">
-            <input type="text" name="username" class="form-control" placeholder="Tài khoản" required>
-        </div>
-        <div class="mb-3 text-start">
-            <input type="password" name="password" class="form-control" placeholder="Mật khẩu" required>
-        </div>
-        <button type="submit" class="btn btn-primary w-100 mb-2">Đăng Nhập</button>
-    </form>
-    <p class="text-white">Chưa có tài khoản? <a href="/register" class="text-warning">Đăng Kí</a></p>
-</div>
-</body>
-</html>
-''', error_msg=error_msg)
-
-@app.route('/register', methods=['GET','POST'])
-def register():
-    error_msg = None
-    if request.method=='POST':
-        username = request.form['username']
-        password = request.form['password']
-        user_file = get_user_file(username)
-        if os.path.exists(user_file):
-            error_msg = "Tài khoản đã tồn tại"
-        else:
-            json.dump({'pass':hash_pass(password)}, open(user_file,'w'))
-            os.makedirs(user_folder(username), exist_ok=True)
-            session['user'] = username
-            return redirect(url_for('index'))
-
-    return render_template_string('''
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Đăng Kí</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/css/bootstrap.min.css" rel="stylesheet">
-<style>
-body {background: linear-gradient(135deg, #ff758c, #ff7eb3); min-height:100vh; display:flex; justify-content:center; align-items:center;}
-.card {border-radius:15px; padding:20px; width:100%; max-width:400px; box-shadow:0 8px 20px rgba(0,0,0,0.3);}
-.btn {border-radius:50px;}
-</style>
-</head>
-<body>
-<div class="card text-center">
-    <h2 class="mb-3 text-white">Đăng Kí</h2>
-    {% if error_msg %}
-        <div class="alert alert-danger">{{error_msg}}</div>
-    {% endif %}
-    <form method="post">
-        <div class="mb-3 text-start">
-            <input type="text" name="username" class="form-control" placeholder="Tài khoản" required>
-        </div>
-        <div class="mb-3 text-start">
-            <input type="password" name="password" class="form-control" placeholder="Mật khẩu" required>
-        </div>
-        <button type="submit" class="btn btn-success w-100 mb-2">Đăng Kí</button>
-    </form>
-    <p class="text-white">Đã có tài khoản? <a href="/login" class="text-warning">Đăng Nhập</a></p>
-</div>
-</body>
-</html>
-''', error_msg=error_msg)
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-# ----------------- Run -----------------
-if __name__=='__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+if __name__ == "__main__":
+    # Start bot thread
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.daemon = True
+    bot_thread.start()
+    
+    # Start Flask server
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
